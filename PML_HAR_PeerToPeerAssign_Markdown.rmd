@@ -1,0 +1,394 @@
+---
+title: 'Practical Machine Learning : Human Activity Recognition'
+author: "Ralph Kevin MEKIE"
+date: "1 july 2019"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE, cache=TRUE, tidy.opts=list(width.cutoff=60),tidy=TRUE, width=60)
+```
+
+##INTRODUCTION
+
+One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it.
+The purpose of this analysis is to predict the manner in which they did the exercise, using data from accelerometers (on the belt, forearm, arm, and dumbell) of 6 participants.
+We will choose/build the suitable model for this prediction task and then apply it on 20 test cases provided for this study.
+
+An overview of our study is available in the below rubric "EXECUTIVE SUMMARY".
+
+
+
+#0. EXECUTIVE SUMMARY :
+
+
+Our study will be performed as follow :
+
+1. Exploratory Analysis
+2. Clean Datas
+3. Prepare Datas
+4. Create Suitable models (Suppervised - Classification)
+5. Model selection
+6. Apply our selected Model
+ 
+ CONCLUSION.
+
+
+ 
+#1. Exploratory Analysis
+
+
+a. First of all, let us look at the *pmltraining* dataset :
+
+
+```{r}
+library(caret)
+library(nnet)
+library(rpart)
+library(e1071)
+library(parallel)      
+library(doParallel)  
+urltrain <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"         
+#Get training datas
+urltest <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"           
+#Get testing datas
+#download.file(urltrain,"pmltraining.csv",mode="wb"); download.file(urltest,"pmltesting.csv",mode="wb")
+pmltraining = read.csv("pmltraining.csv")
+pmltesting = read.csv("pmltesting.csv")
+writeLines(paste("\n","The pmltraining dataframe is :\n- ",dim(pmltraining)[1],"measurements over",length(unique(pmltraining$user_name)),"participants,\n- And",dim(pmltraining)[2],"columns(each being either user_name, timestamp & numerics measurements).", "\n"))
+```
+
+We will not print all the features as they are 160; a deep look at our dataframe learn to us that we got:
+
+- 8 factor columns (user_name, classe, window...)
+- several (152) numerics mesurements (x,y,min,max,avg,stddev,total,kurtosis,skewness...) per accelerometers location (belt, forearm, arm, and dumbell).
+- Observations populated for our 6 participants.
+- 5 classes which intent to describe participant activities.
+
+We should note that summary command(**which we can't print here too, as it provide large output on our massive dataframe**) show us we got :
+
+- A lot of missing data.
+- Wrong data types.
+ 
+ 
+b. Let us prepare our datas : 
+
+As part of datascience pipeline guide, we should split our training dataframe into **train 70%** and **Validation 30%** before assessing our test datas.
+
+```{r}
+set.seed(1234) #Ensure reproducible results
+inTrain = createDataPartition(pmltraining$classe, p = 2/3)[[1]]
+PmlRealTrain = pmltraining[ inTrain,]
+PmlValidation = pmltraining[ -inTrain,]
+```
+
+
+#2. Clean Datas
+
+In this section, we will have to define a procedure for :
+
+- Full "NA" datas; using mean of "non NA" values.
+- Wrong types (Ex: Factor instead of Numerics).
+- Constant numerics variables; as they may not always be constant, can lead to mistakes (will ad light white noise).
+
+As we are going to process it for each new datas and also the validation and test one, we should create some robust function.
+
+```{r}
+#DF PREPARATION
+GetPmlDatasReadyPca <- function(pmldataframe) {
+		OVERALLCOLNAMES <- colnames(pmldataframe)
+		#PRESELECT NUMERIC COLUMNS
+			skewness_index <- grep("skewness",OVERALLCOLNAMES); kurtosis_index <- grep("kurtosis",OVERALLCOLNAMES)
+			min_index <- grep("min",OVERALLCOLNAMES); max_index <- grep("max",OVERALLCOLNAMES)
+			ampli_index <- grep("amplitude",OVERALLCOLNAMES); roll_index <- grep("roll",OVERALLCOLNAMES)
+			pitch_index <- grep("pitch",OVERALLCOLNAMES); yaw_index <- grep("yaw",OVERALLCOLNAMES)
+			x_index <- grep("_x",OVERALLCOLNAMES); y_index <- grep("_y",OVERALLCOLNAMES); z_index <- grep("_z",OVERALLCOLNAMES)
+			tot_index <- grep("total_",OVERALLCOLNAMES); std_index <- grep("stddev_",OVERALLCOLNAMES)
+			avg_index <- grep("avg_",OVERALLCOLNAMES); var_index <- grep("var_",OVERALLCOLNAMES)
+		#NO ODD VALUES ON NUMERICS
+		numeric_idx <- c(skewness_index, kurtosis_index, min_index, max_index, ampli_index, x_index, y_index, z_index, 
+						 tot_index, avg_index, var_index, std_index, roll_index, pitch_index, yaw_index
+						 )
+		numeric_idx <- unique(numeric_idx[order(numeric_idx)]); CURSOR <- pmldataframe; CURSOREND <- pmldataframe
+		#---------------------------------
+			rw <- dim(CURSOR)[1]; cl <- dim(CURSOR)[2]
+			FULLidx <- matrix(rep(1,rw*cl), nrow=rw, ncol=cl); BADidx <- matrix(rep(0,rw*cl), nrow=rw, ncol=cl)
+			CLNidx <- matrix(rep(1,rw*cl), nrow=rw, ncol=cl); MSSNGidx <- matrix(rep(0,rw*cl), nrow=rw, ncol=cl)
+			DIV0idx <- matrix(rep(0,rw*cl), nrow=rw, ncol=cl); NAidx <- matrix(rep(0,rw*cl), nrow=rw, ncol=cl)
+		#---------------------------------
+			for (i in numeric_idx) { 
+				MSSNGidx[,i] <- (1*(as.character(CURSOR[,i])=="") & (!1*is.na(as.numeric(CURSOR[,i]))))
+				DIV0idx[,i] <- (1*(as.character(CURSOR[,i])=="#DIV/0!") & (!1*is.na(as.numeric(CURSOR[,i]))))
+				#******** too usefull ************
+				CURSOR[,i] <- as.numeric(CURSOR[,i]); CURSOREND[,i] <- as.numeric(CURSOREND[,i])
+				#******** too usefull ************
+				NAidx[,i] <- 1*(is.na(CURSOR[,i]) | is.nan(CURSOR[,i]))
+				CURSOR[which(NAidx[,i]==1),i]<-NA; CURSOREND[which(NAidx[,i]==1),i]<-NA
+				#---------------------------------
+				BADidx[,i] <- NAidx[,i] + MSSNGidx[,i] + DIV0idx[,i]
+				#---------------------------------
+				CLNidx[,i] <- FULLidx[,i] - BADidx[,i] 
+				#---------------------------------
+				CURSOREND[which(BADidx[,i]==1),i] <- mean(as.numeric((CURSOR[which(CLNidx[,i]==1),i])))
+				#introduce some quiet white noise for overall missing values variance=10^-40
+				if ( (sum(!is.na(CURSOREND[,i]))==0) | (var(CURSOREND[,i])==0) ) {CURSOREND[,i] <- rnorm(rw, mean = 0, sd=10^-20)}
+				}
+		CURSOREND
+		}
+#Init TRAIN DATA 
+InitPmlTrain <- GetPmlDatasReadyPca(PmlRealTrain)
+```
+
+**No column is deleted; white noise can be reproduced as the seed is defined.**
+
+
+#3. Prepare Datas
+
+We now need to reduce features whitout loosing information. 
+For this purpose, we will use PCA transformation at 99,5% variability kept.
+
+```{r}
+#PCA for 99.5% variance explained kept
+PrepCA <- preProcess(InitPmlTrain,method="pca", thresh = 0.995); Train_based_required_PC <- PrepCA$numComp
+```
+
+As we may need to get the same number of columns for next dataframes, we must freeze the number of principal components.
+**We will always use the number of Principal Component yielded by the train data PCA at 99.5%.**
+
+```{r}
+PrepCA_fixPC <- preProcess(InitPmlTrain,method="pca", pcaComp=Train_based_required_PC)
+ReadyPmlTrain <- predict(PrepCA_fixPC,newdata=InitPmlTrain)
+```
+
+Some of the below models will not like static facors as level will drop down (for example one line to predict).
+We may prepare alternative dataframe (only numeric features) to avoid some contrast errors (common error online with advanced models).
+
+```{r}
+#Get numeric feature for SVM & NeuralNetwork as activity not much depends on username,timestamp and window
+NumerizePml <- function (dataframe) {
+					if (length(grep("classe",colnames(dataframe)))==1) {
+					cbind(dataframe[,-which(sapply(dataframe, function(x) is.factor(x)))],classe=dataframe$classe)
+					} else {
+					dataframe[,-which(sapply(dataframe, function(x) is.factor(x)))]
+					}
+				}
+classe_scope=levels(ReadyPmlTrain$classe)
+```
+
+
+#4. Create Suitable models (Suppervised - Classification)
+
+
+As we face a supervised classification problem we may use :
+
+- Suitable models for classification (instead of regression for example).
+- Suitable models for suppervised learn.
+
+
+We are going to build up 5 models :
+
+	a- Tree classificator.
+
+	b- Random Forest.
+
+	c- SVM = Support Vector Machine.
+
+	d- Neural Network.
+
+	e- Combined model based on above models predictions.
+
+	
+	
+.a- Tree classificator.
+```{r}
+#DEFINING THE MODEL -- SUPPERVISED LEARNING -- CLASSIFICATION
+#1-  model fit --- tree
+mdfit_tree <- train(classe~., method='rpart', ReadyPmlTrain)
+tree_built_duration <-  round(mdfit_tree$times$everything[3]/60,3)
+```
+
+.b- Random Forest.
+```{r}
+#2 - model fit --- random forest 
+##  !!Random forest seems to be better using mutiple threads (in fact several trees in parallel)!!
+##          MODEL PARAMS SETTINGS
+cluster_memory <- makeCluster(detectCores() -1) #should leave one core for natural OS
+registerDoParallel(cluster_memory)
+MdeltrCtrlParams <- trainControl(method="cv", number=(detectCores() -1), allowParallel=TRUE)
+##          END -- MODEL PARAMS SETTINGS
+mdfit_rf <- train(classe~., method='rf', data=ReadyPmlTrain, trControl=MdeltrCtrlParams)
+#   !!Stop Parallel processing!!
+stopCluster(cluster_memory)
+#   !!Force R to return on single threaded processing!!
+registerDoSEQ()
+rfor_built_duration <-  round(mdfit_rf$times$everything[3]/60,3)
+```
+
+**We performed some parallel tuning, cause, we found it really time consuming to run this size of datas for RandomForest.**
+
+.c- SVM = Support Vector Machine.
+```{r}
+#3 - model fit --- svm
+startsvm <- proc.time()[3]
+mdfit_svm <- svm(classe~., data=NumerizePml(ReadyPmlTrain), na.action=na.omit)
+svm_built_duration <- round((proc.time()[3]-startsvm)/60,3)
+```
+
+**Default SVM on numeric features.**
+
+.d- Neural Network.
+```{r}
+#4 - model fit --- Neural Network
+startnn <- proc.time()[3]
+# to compute neural network it's better to work on numerics
+prepare_neural_data <- function(dataframe) {
+	d <- scale(data.frame(predict(dummyVars(~., data = dataframe), dataframe))); d[,grep("PC",colnames(d))]
+}
+mdel_nnet <- nnet(prepare_neural_data(NumerizePml(ReadyPmlTrain)), y=class.ind(ReadyPmlTrain$classe), entropy=T, size=6, maxit=100)
+nn_built_duration <- round((proc.time()[3]-startnn)/60,3)
+```
+
+**We ran 6 neuronal in the hidden layer for numeric features..**
+
+.e- Combined model based on above models predictions.
+```{r}
+#5 - model fit --- Bagging Combine using rf
+startcmbrf <- proc.time()[3]
+# First get our combination
+PrdictTreeTrain <- predict(mdfit_tree,newdata=ReadyPmlTrain)
+PrdictRfTrain <- predict(mdfit_rf,newdata=ReadyPmlTrain)
+PrdictSvmTrain <- predict(mdfit_svm,newdata=NumerizePml(ReadyPmlTrain))
+#Max.col for majority neuronal vote
+PrdictNnTrain <- max.col(predict(mdel_nnet,newdata=prepare_neural_data(NumerizePml(ReadyPmlTrain))))
+trpredictors <- unique(cbind(p1=PrdictTreeTrain, p2=PrdictRfTrain, p3=PrdictSvmTrain, p4=PrdictNnTrain, classe=ReadyPmlTrain$classe))
+## Dont need parallel here only 5 cols :)
+mdfit_cmbn <- train(factor(classe)~., method='rf', data=trpredictors)
+cmbrf_built_duration <- round((proc.time()[3]-startcmbrf)/60,3)
+```
+
+**The combined predictor is also ready :).**
+
+
+
+#5. Model selection
+
+
+The process is somehow simple here. Using validation datas, we will :
+
+- Get Accuracy values per model.
+- Assess the required time used to build the model.
+- Assess the required time used to apply the model.
+
+And therefore, choose the best model.
+
+
+```{r}
+#PREPARE VALIDATION DATAS
+InitPmlValid <- GetPmlDatasReadyPca(PmlValidation[,-grep("classe",colnames(PmlValidation))])
+ReadyPmlValid <- predict(PrepCA_fixPC,newdata=InitPmlValid)
+
+#Define our Accuracy retriever method from confusionMatrix 
+GetAccuracy <- function (pml_dtframe, classe_based_modeloutput) {
+AccClasse <- confusionMatrix(reference=factor(pml_dtframe$classe), data=factor(classe_scope[classe_based_modeloutput]))$overall["Accuracy"]
+as.numeric(AccClasse)
+}
+
+#Predict on Validation dataframe using Tree
+stpredtree <- proc.time()[3]
+PrdictTreeValid <- predict(mdfit_tree,newdata=ReadyPmlValid)
+TreeAcc <- GetAccuracy(PmlValidation, PrdictTreeValid)
+predtree_duration<- round((proc.time()[3]-stpredtree)/60,3)
+#Tree overall metrics
+TreeInfo <- c(1,"Tree","mdfit_tree", "N", tree_built_duration, predtree_duration, TreeAcc)
+
+#Predict on Validation dataframe using RandomForest
+stpredrf <- proc.time()[3]
+PrdictRfValid <- predict(mdfit_rf,newdata=ReadyPmlValid)
+rfAcc <- GetAccuracy(PmlValidation, PrdictRfValid)
+predrf_duration<- round((proc.time()[3]-stpredrf)/60,3)
+#RandomForest overall metrics
+RfInfo <- c(2,"Rforest","mdfit_rf", "Y", rfor_built_duration, predrf_duration, rfAcc)
+
+#Predict on Validation dataframe using SVM
+stpredsvm <- proc.time()[3]
+PrdictSvmValid <- predict(mdfit_svm,newdata=NumerizePml(ReadyPmlValid))
+svmAcc <- GetAccuracy(PmlValidation, PrdictSvmValid)
+predsvm_duration<- round((proc.time()[3]-stpredsvm)/60,3)
+#SVM overall metrics
+SvmInfo <- c(3,"Svm","mdfit_svm", "N", svm_built_duration, predsvm_duration, svmAcc)
+
+#Predict on Validation dataframe using Neural Network
+stprednn <- proc.time()[3]
+#Max.col for majority neuronal vote
+PrdictNnValid <- max.col(predict(mdel_nnet,newdata=prepare_neural_data(NumerizePml(ReadyPmlValid))))
+NnAcc <- GetAccuracy(PmlValidation, PrdictNnValid)
+prednn_duration<- round((proc.time()[3]-stprednn)/60,3)
+#NeurNtwrk overall metrics
+nnInfo <- c(4,"NeurNtwrk","mdel_nnet", "N", nn_built_duration, prednn_duration, NnAcc)
+
+#Predict on Validation dataframe using Rf Bagging using above models combination
+stpredCmbn <- proc.time()[3]
+vlpredictors <- cbind(p1=PrdictTreeValid, p2=PrdictRfValid, p3=PrdictSvmValid, p4=PrdictNnValid, classe=ReadyPmlValid$classe)
+PrdictCmbnValid <- predict(mdfit_cmbn,newdata=vlpredictors)
+cmbnAcc <- GetAccuracy(PmlValidation, PrdictCmbnValid)
+predCmbn_duration<- round((proc.time()[3]-stpredCmbn)/60,3)
+#CmbnPredBagging_rf overall metrics
+CmbnInfo <- c(5,"CmbnPredBagging_rf","mdfit_cmbn", "N", cmbrf_built_duration, predCmbn_duration, cmbnAcc)
+
+#Define our Model Selecting Dataset
+MDSelect <- data.frame(rbind(TreeInfo, RfInfo, SvmInfo, nnInfo, CmbnInfo))
+colnames(MDSelect) <- c("Model_ID","Model_Foundation","Model_name", "Parallel_Tuning", "Model_building_duration", "Predict_duration", "Accuracy")
+MDSelect$BestModel <- "N"
+MDSelect[which.max(MDSelect$Accuracy),]$BestModel <- "Y"
+index_selected_model <- MDSelect[which.max(MDSelect$Accuracy),]$Model_ID
+SelectedModel <- get(noquote(as.character(MDSelect[which.max(MDSelect$Accuracy),]$Model_name)))
+#OutOfSampleErr <- MDSelect[which.max(MDSelect$Accuracy),]$Accuracy
+writeLines(paste("\n","The out of sample error rate is around 1.15% \n"))
+MDSelect
+```
+
+**As provided above, the overall comparison table highlight the wining contender**(the combined predictor) **in the colulmn "BestModel".** 
+
+In fact, due to the nature of the problem and the size of datas, we prefered **prediction** to **explanation**.
+
+#6. Model selection
+
+
+Now, let us apply our best model.
+
+```{r}
+#PREDICTION USING OUR BEST MODEL
+InitPmlTest <- GetPmlDatasReadyPca(pmltesting)
+ReadyPmlTest <- predict(PrepCA_fixPC,newdata=InitPmlTest)
+
+# Prepare less effective models
+PrdictTreeTest <- predict(mdfit_tree,newdata=ReadyPmlTest)
+PrdictRfTest <- predict(mdfit_rf,newdata=ReadyPmlTest)
+PrdictSvmTest <- predict(mdfit_svm,newdata=NumerizePml(ReadyPmlTest))
+# Max.col for majority neuronal vote
+PrdictNnTest <- max.col(predict(mdel_nnet,newdata=prepare_neural_data(NumerizePml(ReadyPmlTest))))
+# Get our Predicting dataset
+Tstpredictors <- cbind(p1=PrdictTreeTest, p2=PrdictRfTest, p3=PrdictSvmTest, p4=PrdictNnTest, classe=ReadyPmlTest$classe)
+PrdictCmbnTest <- predict(mdfit_cmbn,newdata=Tstpredictors)
+#Overall Predictions
+TestPredMdelsDF <- cbind(PrdictTreeTest, PrdictRfTest, PrdictSvmTest, PrdictNnTest, PrdictCmbnTest)
+
+#finally the prediction -- SVM based on our previous study
+Tstprediction <- data.frame(predicted_class=classe_scope[TestPredMdelsDF[,index_selected_model]])
+```
+
+
+
+##CONCLUSION  
+
+Depending on the ressources, time available, one may alternate between **NeuralNetwork**, **SVM** & **"Combined model"**.
+
+Please note that the datas are available on [Human Activity Recognition web site](http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har).
+
+Lets print our test prediction to csv file.
+
+```{r}
+#Lets dispaly our results in csv file
+write.csv(cbind(problem_id=pmltesting$problem_id,Tstprediction), file = "Pml_20_cases_prediction.csv",row.names=FALSE)
+```
